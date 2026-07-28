@@ -1,0 +1,231 @@
+.gitignore# ==================================================
+# TradeX AI Pro v4.0
+# .gitignore
+# ==================================================
+
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C Extensions
+*.so
+
+# Distribution
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Installer Logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit Test
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# Type Checker
+.mypy_cache/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# -----------------------------
+# Virtual Environment
+# -----------------------------
+venv/
+env/
+ENV/
+.venv/
+
+# -----------------------------
+# Environment Variables
+# -----------------------------
+.env
+.env.*
+!.env.example
+
+# -----------------------------
+# Secrets
+# -----------------------------
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secret.json
+credentials.json
+
+# -----------------------------
+# SQLite Database
+# -----------------------------
+*.db
+*.sqlite
+*.sqlite3
+
+# -----------------------------
+# Logs
+# -----------------------------
+logs/
+*.log
+
+# -----------------------------
+# Excel Reports
+# -----------------------------
+reports/
+exports/
+*.xlsx
+*.xls
+
+# -----------------------------
+# CSV Files
+# -----------------------------
+*.csv
+
+# Keep sample data if needed
+!sample_data.csv
+
+# -----------------------------
+# Cached Market Data
+# -----------------------------
+cache/
+data_cache/
+market_cache/
+
+# -----------------------------
+# Temporary Files
+# -----------------------------
+*.tmp
+*.bak
+*.swp
+*.swo
+*.old
+
+# -----------------------------
+# VS Code
+# -----------------------------
+.vscode/
+
+# -----------------------------
+# PyCharm
+# -----------------------------
+.idea/
+
+# -----------------------------
+# Spyder
+# -----------------------------
+.spyproject/
+
+# -----------------------------
+# Rope
+# -----------------------------
+.ropeproject/
+
+# -----------------------------
+# macOS
+# -----------------------------
+.DS_Store
+
+# -----------------------------
+# Windows
+# -----------------------------
+Thumbs.db
+Desktop.ini
+
+# -----------------------------
+# Streamlit
+# -----------------------------
+.streamlit/secrets.toml
+
+# Keep Streamlit config
+!.streamlit/config.toml
+
+# -----------------------------
+# Build Artifacts
+# -----------------------------
+*.zip
+*.tar
+*.gz
+
+# -----------------------------
+# Backup Files
+# -----------------------------
+backup/
+backups/
+
+# -----------------------------
+# Render
+# -----------------------------
+.render/
+
+# -----------------------------
+# Runtime
+# -----------------------------
+*.pid
+*.seed
+
+# -----------------------------
+# Local Settings
+# -----------------------------
+local_settings.py
+
+# -----------------------------
+# API Tokens
+# -----------------------------
+token.txt
+access_token.txt
+refresh_token.txt
+
+# -----------------------------
+# Broker Credentials
+# -----------------------------
+broker_config.json
+angel_credentials.json
+
+# -----------------------------
+# Generated Images
+# -----------------------------
+screenshots/
+images/output/
+
+# -----------------------------
+# Android
+# -----------------------------
+.gradle/
+local.properties
+
+# -----------------------------
+# Misc
+# -----------------------------
+*.orig
+*.rej
+
+# ==================================================
+# End of File
+# ==================================================

@@ -1,0 +1,22 @@
+streamlit>=1.30.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+yfinance>=0.2.35
+requests>=2.31.0
+scipy>=1.11.0
+
+# Angel One SmartAPI
+smartapi-python>=1.5.5
+
+# Technical Indicators
+ta>=0.11.0
+
+# Excel Export
+openpyxl>=3.1.2
+
+# Date utilities
+python-dateutil>=2.9.0
+
+# Environment Variables
+python-dotenv>=1.0.1
