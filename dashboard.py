@@ -493,8 +493,12 @@ if st.sidebar.button("💾 Save Settings", disabled=not has_permission("Admin"))
 st.title("⚡ TradeX AI Pro v4.0 — Institutional Station")
 st.caption(f"Mode: **{execution_mode}** | Broker: **{selected_broker}** | Refresh: **{auto_refresh_sec}s**")
 
-if auto_refresh_sec > 0:
-    st.autorefresh(interval=auto_refresh_sec * 1000, key="institutional_dashboard_refresh")
+from streamlit_autorefresh import st_autorefresh
+
+st_autorefresh(
+    interval=auto_refresh_sec * 1000,
+    key="institutional_dashboard_refresh"
+)
 
 snapshot = get_dashboard_status_snapshot()
 snapshot["refresh_interval"] = auto_refresh_sec
