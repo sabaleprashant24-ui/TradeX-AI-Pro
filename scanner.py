@@ -14,7 +14,6 @@ Compatible with Python 3.13 and Pydroid 3.
 """
 
 from datetime import datetime, timedelta
-import logging
 from typing import Dict, Any, List, Optional
 import pandas as pd
 
@@ -35,12 +34,18 @@ except ImportError:
         "duplicate_ttl_minutes": 30
     }
 
-# Robust Strategy Loader via Registry Function
+# Safe Strategy Loader via Registry Function
 try:
     from strategies import get_strategy
 except ImportError:
     def get_strategy(strategy_name: str):
         return None
+
+# Safe Hero-Zero Engine Loader
+try:
+    from hero_zero import HERO_ZERO
+except ImportError:
+    HERO_ZERO = None
 
 
 class MarketRegimeProfiler:
@@ -54,12 +59,19 @@ class MarketRegimeProfiler:
         if df_daily is None or df_daily.empty or len(df_daily) < 20:
             return {"regime": "UNKNOWN", "volatility": "NORMAL", "vix": india_vix}
 
-        close = df_daily["close"].iloc[-1]
-        atr = df_daily["ATR"].iloc[-1] if "ATR" in df_daily.columns else 0.0
+        close = float(df_daily["close"].iloc[-1])
+        
+        # Safe ATR retrieval (Handles both 'atr' and 'ATR')
+        atr_col = "atr" if "atr" in df_daily.columns else ("ATR" if "ATR" in df_daily.columns else None)
+        atr = float(df_daily[atr_col].iloc[-1]) if atr_col else 0.0
         atr_pct = (atr / close) * 100.0 if close > 0 else 0.0
 
-        ema20 = df_daily["EMA_20"].iloc[-1] if "EMA_20" in df_daily.columns else close
-        ema50 = df_daily["EMA_50"].iloc[-1] if "EMA_50" in df_daily.columns else close
+        # Safe EMA retrieval (Handles both lower and upper case)
+        ema20_col = "ema_20" if "ema_20" in df_daily.columns else ("EMA_20" if "EMA_20" in df_daily.columns else None)
+        ema50_col = "ema_50" if "ema_50" in df_daily.columns else ("EMA_50" if "EMA_50" in df_daily.columns else None)
+
+        ema20 = float(df_daily[ema20_col].iloc[-1]) if ema20_col else close
+        ema50 = float(df_daily[ema50_col].iloc[-1]) if ema50_col else close
 
         # Volatility Profiling
         volatility = "NORMAL"
@@ -124,6 +136,10 @@ class MarketScanner:
         self.regime_profiler = MarketRegimeProfiler()
         self.duplicate_filter = DuplicateSignalFilter()
 
+    def scan_all_symbols(self, symbols: List[str]) -> List[Dict[str, Any]]:
+        LOGGER.warning("MarketScanner.scan_all_symbols called without candle data provider; returning no signals.")
+        return []
+
     def analyze_symbol_mtf(
         self,
         symbol: str,
@@ -160,6 +176,8 @@ class MarketScanner:
             hero_zero_strat = get_strategy("hero_zero") or get_strategy("HERO_ZERO")
             if callable(hero_zero_strat):
                 strategy_result = hero_zero_strat(primary_df, option_type=option_type)
+            elif HERO_ZERO and hasattr(HERO_ZERO, "evaluate"):
+                strategy_result = HERO_ZERO.evaluate(primary_df)
 
         # Core MultiFactor Strategy Engine Fallback
         if strategy_result.get("signal", "NEUTRAL") == "NEUTRAL":
@@ -169,7 +187,7 @@ class MarketScanner:
 
         raw_signal = strategy_result.get("signal", "NEUTRAL")
         score = strategy_result.get("score", 0)
-        confidence = strategy_result.get("confidence", 0.0)
+        confidence = float(strategy_result.get("confidence", 0.0))
 
         if raw_signal == "NEUTRAL":
             return {
@@ -255,8 +273,11 @@ class MarketScanner:
                 continue
             total_timeframes += 1
             last_row = df.iloc[-1]
-            close = last_row["close"]
-            ema50 = last_row.get("EMA_50", close)
+            close = float(last_row["close"])
+            
+            # Flexible EMA 50 Column lookup
+            ema50_col = "ema_50" if "ema_50" in df.columns else ("EMA_50" if "EMA_50" in df.columns else None)
+            ema50 = float(last_row[ema50_col]) if ema50_col else close
 
             if raw_signal == "BUY" and close >= ema50:
                 aligned_count += 1
@@ -273,5 +294,5 @@ class MarketScanner:
             return {"is_aligned": False, "reason": f"MTF Mismatch (Only {aligned_count}/{total_timeframes} aligned)"}
 
 
-# Global Market Scanner Singleton Instance
+# Global Market Scanner Instance
 MARKET_SCANNER = MarketScanner()

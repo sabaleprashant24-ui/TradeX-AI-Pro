@@ -99,7 +99,7 @@ class Backtester:
                 brokerage = 20.0
                 stt = (trade_value * 0.00025) if action == "SELL" else 0.0
 
-        else:  # CUSTOM
+        else:  # CUSTOM / DEFAULT
             brokerage = 20.0
             stt = (trade_value * 0.001) if action == "SELL" else 0.0
 
@@ -157,7 +157,11 @@ class Backtester:
         self.sector_exposure_history.clear()
 
         # Find overlapping timestamps across symbols
-        common_timestamps = sorted(list(set.intersection(*[set(df['timestamp'].astype(str)) for df in data_dict.values()])))
+        all_timestamps = [set(df['timestamp'].astype(str)) for df in data_dict.values() if 'timestamp' in df.columns]
+        if not all_timestamps:
+            return {"success": False, "message": "Invalid dataframe columns; 'timestamp' required."}
+
+        common_timestamps = sorted(list(set.intersection(*all_timestamps)))
         
         if len(common_timestamps) < 20:
             return {"success": False, "message": "Insufficient common historical candles across symbols."}
@@ -211,6 +215,7 @@ class Backtester:
                 if not sym_rows.empty:
                     c_price = float(sym_rows.iloc[0]['close'])
                     pnl = (c_price - pos["entry_price"]) * pos["qty"] if pos["action"] == "BUY" else (pos["entry_price"] - c_price) * pos["qty"]
+                    pos["unrealized_pnl"] = pnl
                     unrealized += pnl
 
                 sec = SECTOR_MAP.get(sym, "OTHERS")
@@ -293,12 +298,13 @@ class Backtester:
 
         # Risk Manager Sizing or Default 10% Portfolio Alloc per position
         if RISK_MANAGER and sl_dist and sl_dist > 0:
+            stop_price = (exec_price - sl_dist) if action == "BUY" else (exec_price + sl_dist)
             qty = RISK_MANAGER.calculate_position_size(
-                account_balance=self.cash, entry_price=exec_price, stop_loss_price=(exec_price - sl_dist if action == "BUY" else exec_price + sl_dist)
+                account_balance=self.cash, entry_price=exec_price, stop_loss_price=stop_price
             )
         else:
             trade_alloc = self.cash * 0.10
-            qty = int(trade_alloc / exec_price)
+            qty = int(trade_alloc / exec_price) if exec_price > 0 else 0
 
         if qty <= 0:
             return
@@ -340,7 +346,8 @@ class Backtester:
             "take_profit": tp_val,
             "trailing_sl": exec_price * 0.008,
             "charges_paid": charges,
-            "product_type": product_type
+            "product_type": product_type,
+            "unrealized_pnl": 0.0
         }
 
     def _close_position(self, paper_id: str, exit_price: float, timestamp: str, reason: str = "SIGNAL"):
@@ -406,15 +413,15 @@ class Backtester:
 
         eq_series = pd.Series([pt["equity"] for pt in self.equity_curve])
         returns = eq_series.pct_change().dropna()
-        sharpe = float((returns.mean() / returns.std()) * np.sqrt(252)) if len(returns) > 1 and returns.std() != 0 else 0.0
+        sharpe = float((returns.mean() / returns.std()) * np.sqrt(252)) if len(returns) > 1 and returns.std() > 0 else 0.0
 
         days = max(1, len(timestamps))
         years = days / 252.0
         final_eq = self.cash
         cagr = (((final_eq / self.initial_capital) ** (1 / years)) - 1) * 100 if years > 0 and final_eq > 0 else 0.0
 
-        # Drawdown
-        peak = eq_series.iloc[0]
+        # Drawdown Calculations
+        peak = eq_series.iloc[0] if not eq_series.empty else self.initial_capital
         max_dd = 0.0
         for eq in eq_series:
             if eq > peak:
@@ -430,10 +437,10 @@ class Backtester:
             "net_pnl": round(net_pnl, 2),
             "cagr_pct": round(cagr, 2),
             "sharpe_ratio": round(sharpe, 2),
-            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else gross_profit,
-            "expectancy_per_trade": round(net_pnl / total_trades, 2),
+            "profit_factor": round(gross_profit / gross_loss, 2) if gross_loss > 0 else round(gross_profit, 2),
+            "expectancy_per_trade": round(net_pnl / total_trades, 2) if total_trades > 0 else 0.0,
             "total_trades": total_trades,
-            "win_rate_pct": round((len(winning) / total_trades) * 100, 2),
+            "win_rate_pct": round((len(winning) / total_trades) * 100, 2) if total_trades > 0 else 0.0,
             "max_drawdown_pct": round(max_dd, 2),
             "trades": self.closed_trades,
             "equity_curve": self.equity_curve[-100:]
@@ -455,8 +462,11 @@ class Backtester:
         :param test_window: Candle count for Out-of-Sample testing
         """
         results = []
-        common_ts = sorted(list(set.intersection(*[set(df['timestamp'].astype(str)) for df in data_dict.values()])))
-        
+        all_timestamps = [set(df['timestamp'].astype(str)) for df in data_dict.values() if 'timestamp' in df.columns]
+        if not all_timestamps:
+            return results
+
+        common_ts = sorted(list(set.intersection(*all_timestamps)))
         total_len = len(common_ts)
         start_idx = 0
 

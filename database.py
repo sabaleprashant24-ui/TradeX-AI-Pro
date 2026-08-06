@@ -8,28 +8,98 @@ Trade History, Daily PnL Summaries, and Backtest Results.
 Compatible with Python 3.13 and Pydroid 3.
 """
 
+from contextlib import contextmanager
 from datetime import datetime
 import json
+import pathlib
 import sqlite3
-from typing import Any, Dict, List, Optional
+import threading
+import time
+from typing import Any, Dict, Generator, List, Optional
+
+try:
+    from config import Config
+except ImportError:
+    Config = None
+
+from logger import LOGGER
+
+
+# Thread lock to guarantee thread-safety across concurrent database writes
+DB_LOCK = threading.RLock()
+
+
+def retry_on_db_lock(max_retries: int = 3, initial_delay: float = 0.1):
+    """Decorator to retry database operations on sqlite3.OperationalError (database is locked)."""
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            delay = initial_delay
+            for attempt in range(1, max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except sqlite3.OperationalError as e:
+                    if "locked" in str(e).lower() and attempt < max_retries:
+                        LOGGER.warning(f"Database locked, retrying attempt {attempt}/{max_retries} in {delay:.2f}s...")
+                        time.sleep(delay)
+                        delay *= 2  # Exponential Backoff
+                    else:
+                        raise
+        return wrapper
+    return decorator
 
 
 class DatabaseManager:
     """Manages SQLite tables and CRUD operations for TradeX AI Pro."""
 
-    def __init__(self, db_path: str = "tradex_ai.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: Optional[str] = None):
+        if db_path is None and Config and hasattr(Config, 'DB_PATH'):
+            self.db_path = Config.DB_PATH
+        else:
+            self.db_path = db_path or "tradex_ai.db"
+            
         self._initialize_tables()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Returns SQLite connection with row factory."""
-        conn = sqlite3.connect(self.db_path)
+    def get_connection(self) -> sqlite3.Connection:
+        """Creates and returns a thread-safe connection with WAL mode and performance PRAGMAs enabled."""
+        timeout_val = getattr(Config, 'DB_TIMEOUT', 30) if Config else 30
+        conn = sqlite3.connect(
+            self.db_path,
+            check_same_thread=False,
+            timeout=timeout_val
+        )
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA foreign_keys=ON;")
+            conn.execute("PRAGMA temp_store=MEMORY;")
+        except Exception as e:
+            LOGGER.warning(f"Could not set PRAGMA statements: {e}")
         return conn
+
+    @contextmanager
+    def session(self) -> Generator[sqlite3.Connection, None, None]:
+        """Context manager to ensure automatic commit, rollback, thread-safety, and connection cleanup."""
+        with DB_LOCK:
+            @retry_on_db_lock(max_retries=3, initial_delay=0.1)
+            def _get_conn():
+                return self.get_connection()
+
+            conn = _get_conn()
+            try:
+                yield conn
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                LOGGER.error(f"Database transaction error: {e}", exc_info=True)
+                raise
+            finally:
+                conn.close()
 
     def _initialize_tables(self):
         """Creates required database tables if they do not exist."""
-        with self._get_connection() as conn:
+        with self.session() as conn:
             cursor = conn.cursor()
 
             # Orders Table
@@ -124,11 +194,9 @@ class DatabaseManager:
             """
             )
 
-            conn.commit()
-
     def insert_order(self, order_data: Dict[str, Any]):
         """Inserts a new order into the database."""
-        with self._get_connection() as conn:
+        with self.session() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -152,11 +220,10 @@ class DatabaseManager:
                     ),
                 ),
             )
-            conn.commit()
 
     def update_position(self, pos_data: Dict[str, Any]):
         """Inserts or updates active position state."""
-        with self._get_connection() as conn:
+        with self.session() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -181,11 +248,10 @@ class DatabaseManager:
                     pos_data.get("exit_time"),
                 ),
             )
-            conn.commit()
 
     def record_completed_trade(self, trade_data: Dict[str, Any]):
         """Logs closed position into trade_history."""
-        with self._get_connection() as conn:
+        with self.session() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -208,13 +274,20 @@ class DatabaseManager:
                     ),
                 ),
             )
-            conn.commit()
 
     def get_active_positions(self) -> List[Dict[str, Any]]:
         """Fetches all currently OPEN positions."""
-        with self._get_connection() as conn:
+        with self.session() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM positions WHERE status = 'OPEN'")
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    def get_trade_history(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Fetches completed trades history."""
+        with self.session() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trade_history ORDER BY id DESC LIMIT ?", (limit,))
             rows = cursor.fetchall()
             return [dict(row) for row in rows]
 
@@ -229,7 +302,7 @@ class DatabaseManager:
         max_dd: float,
     ):
         """Saves daily PnL and trade analytics summary."""
-        with self._get_connection() as conn:
+        with self.session() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -247,7 +320,6 @@ class DatabaseManager:
                     max_dd,
                 ),
             )
-            conn.commit()
 
     def save_backtest_result(
         self,
@@ -261,7 +333,7 @@ class DatabaseManager:
         metrics: Dict[str, Any],
     ):
         """Stores backtest result report."""
-        with self._get_connection() as conn:
+        with self.session() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -281,7 +353,6 @@ class DatabaseManager:
                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 ),
             )
-            conn.commit()
 
 
 # Global Database Instance

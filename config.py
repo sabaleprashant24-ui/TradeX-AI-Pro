@@ -14,6 +14,13 @@ from datetime import time
 from enum import Enum
 import os
 from typing import Dict
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Config:
+    # .env मधून TOTP Key घेऊन त्यातील स्पेस आणि कॅपिटल/स्मॉल लेटर्सचा प्रॉब्लेम फिक्स करणे
+    TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET", "").replace(" ", "").upper().strip()
 
 
 class TradingEnvironment(Enum):
@@ -30,10 +37,10 @@ class ExecutionMode(Enum):
 @dataclass
 class APIConfig:
     """Angel One SmartAPI Parameters & Credentials fetched securely."""
-    api_key: str = os.getenv("ANGEL_API_KEY", "")
-    client_id: str = os.getenv("ANGEL_CLIENT_ID", "")
-    password: str = os.getenv("ANGEL_PASSWORD", "")
-    totp_secret: str = os.getenv("ANGEL_TOTP_SECRET", "")
+    api_key: str = field(default_factory=lambda: os.getenv("ANGEL_API_KEY", ""))
+    client_id: str = field(default_factory=lambda: os.getenv("ANGEL_CLIENT_ID", ""))
+    password: str = field(default_factory=lambda: os.getenv("ANGEL_PASSWORD", ""))
+    totp_secret: str = field(default_factory=lambda: os.getenv("ANGEL_TOTP_SECRET", ""))
     
     # Session Details (Dynamically updated post login)
     jwt_token: str = ""
@@ -44,7 +51,7 @@ class APIConfig:
 @dataclass
 class RiskConfig:
     """Risk Management and Capital Allocation Rules."""
-    total_capital: float = 100000.0  # Total trading account capital in INR
+    total_capital: float = 100000.0   # Total trading account capital in INR
     risk_per_trade_pct: float = 1.0   # Maximum 1% capital risk per trade
     max_daily_loss_pct: float = 2.0   # Stop trading if daily loss hits 2%
     max_open_positions: int = 3       # Max simultaneous active positions
@@ -53,18 +60,21 @@ class RiskConfig:
     default_target_pct: float = 1.0   # Default Target Profit %
     enable_trailing_sl: bool = True
     trailing_sl_step_pct: float = 0.2  # Trail SL every 0.2% movement in favor
-# config.py मधील RiskConfig मध्ये:
-symbol_exposure_limits_pct: Dict[str, float] = {
-    "NIFTY": 20.0,
-    "BANKNIFTY": 20.0,
-    "FINNIFTY": 15.0,
-    "MIDCPNIFTY": 15.0,
-    "SENSEX": 20.0,
-    "CRUDEOIL": 15.0,
-    "GOLD": 15.0,
-    "NATURALGAS": 15.0,
-    "DEFAULT": 15.0,
-}
+
+    symbol_exposure_limits_pct: Dict[str, float] = field(
+        default_factory=lambda: {
+            "NIFTY": 20.0,
+            "BANKNIFTY": 20.0,
+            "FINNIFTY": 15.0,
+            "MIDCPNIFTY": 15.0,
+            "SENSEX": 20.0,
+            "CRUDEOIL": 15.0,
+            "GOLD": 15.0,
+            "NATURALGAS": 15.0,
+            "DEFAULT": 15.0,
+        }
+    )
+
 
 @dataclass
 class LotSizeConfig:
@@ -77,9 +87,10 @@ class LotSizeConfig:
             "MIDCPNIFTY": 50,
             "SENSEX": 10,
             "BANKEX": 15,
-            "MCX_CRUDEOIL": 100,
-            "MCX_GOLD": 100,
-            "MCX_SILVER": 30,
+            "CRUDEOIL": 100,
+            "GOLD": 100,
+            "SILVER": 30,
+            "NATURALGAS": 1250,
         }
     )
 
@@ -87,11 +98,19 @@ class LotSizeConfig:
 @dataclass
 class MarketTimingConfig:
     """Market Timings and Execution Windows."""
+    # Equity / F&O Timings
     market_open: time = time(9, 15)
     market_close: time = time(15, 30)
     no_new_entry_after: time = time(15, 0)
     square_off_time: time = time(15, 15)
-    hero_zero_start: time = time(13, 30)  # Hero Zero activation window
+    
+    # MCX Commodity Timings
+    mcx_open: time = time(9, 0)
+    mcx_close: time = time(23, 30)
+    mcx_square_off: time = time(23, 15)
+    
+    # Strategy Windows
+    hero_zero_start: time = time(13, 30)
     hero_zero_end: time = time(15, 10)
 
 
@@ -124,9 +143,42 @@ class AppConfig:
     timing: MarketTimingConfig = field(default_factory=MarketTimingConfig)
     timeframe: TimeframeConfig = field(default_factory=TimeframeConfig)
     scanner: ScannerConfig = field(default_factory=ScannerConfig)
-    database_path: str = "tradex_ai.db"
-    log_directory: str = "logs"
+    
+    # Database Settings
+    DB_PATH: str = "tradex_ai.db"
+    DB_TIMEOUT: int = 30
+    LOG_DIRECTORY: str = "logs"
+
+    @property
+    def INITIAL_CAPITAL(self) -> float:
+        return float(os.getenv("CAPITAL", self.risk.total_capital))
+
+    @property
+    def BROKER_TYPE(self) -> str:
+        return os.getenv("BROKER_TYPE", os.getenv("TRADING_MODE", self.env.value)).upper()
+
+    @property
+    def EXECUTION_MODE(self) -> str:
+        return os.getenv("EXECUTION_MODE", "PAPER_TRADE" if self.BROKER_TYPE == "PAPER" else self.mode.value).upper()
+
+    @property
+    def SCAN_INTERVAL(self) -> int:
+        return int(os.getenv("SCAN_INTERVAL", self.scanner.scan_interval_seconds))
+
+    @property
+    def DEFAULT_SYMBOLS(self) -> list[str]:
+        symbols = os.getenv("DEFAULT_SYMBOLS", "NIFTY,BANKNIFTY")
+        return [symbol.strip().upper() for symbol in symbols.split(",") if symbol.strip()]
 
 
-# Global Config Instance
+# Global Config Instances
 CONFIG = AppConfig()
+Config = CONFIG  # Alias for Database/Logger modules compatibility
+
+LIVE_BROKER_CONFIG = {
+    "active_broker": CONFIG.BROKER_TYPE,
+    "api_key": os.getenv("ANGEL_API_KEY", os.getenv("API_KEY", "")),
+    "client_code": os.getenv("ANGEL_CLIENT_ID", os.getenv("CLIENT_CODE", "")),
+    "pin": os.getenv("ANGEL_PASSWORD", os.getenv("PASSWORD", "")),
+    "totp_secret": os.getenv("ANGEL_TOTP_SECRET", os.getenv("TOTP_SECRET", "")).replace(" ", "").upper().strip(),
+}

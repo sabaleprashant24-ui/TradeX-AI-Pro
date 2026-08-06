@@ -14,7 +14,6 @@ Compatible with Python 3.13 and Pydroid 3.
 
 from datetime import datetime
 from enum import Enum
-import logging
 import threading
 from typing import Dict, Any, List, Optional
 import uuid
@@ -71,6 +70,10 @@ class PositionSizer:
         """
         Calculates exact quantity based on maximum allowed risk per trade.
         """
+        capital = float(capital)
+        entry_price = float(entry_price)
+        stop_loss_price = float(stop_loss_price)
+
         if entry_price <= 0 or stop_loss_price <= 0 or entry_price == stop_loss_price:
             return lot_size
 
@@ -92,6 +95,7 @@ class OrderManager:
         self.active_orders: Dict[str, Dict[str, Any]] = {}
         self.open_positions: Dict[str, Dict[str, Any]] = {}
         self.order_history: List[Dict[str, Any]] = []  # Archival for closed orders
+        self.max_history_records: int = 1000
 
     def execute_signal(
         self,
@@ -105,7 +109,7 @@ class OrderManager:
         with self._lock:
             symbol = signal_payload.get("symbol")
             raw_action = str(signal_payload.get("signal", "")).upper()
-            price = signal_payload.get("price", 0.0)
+            price = float(signal_payload.get("price", 0.0))
             sector = signal_payload.get("sector", "GENERAL")
             option_type = signal_payload.get("option_type", "NONE")
 
@@ -124,27 +128,27 @@ class OrderManager:
 
             # 2. Get Account Metrics from Risk Manager
             status_info = RISK_MANAGER.get_status()
-            current_balance = status_info.get("current_balance", 100000.0)
+            current_balance = float(status_info.get("current_balance", 100000.0))
 
             # 3. Dynamic Risk Multiplier Adjustment
-            vix = signal_payload.get("india_vix", 0.0)
+            vix = float(signal_payload.get("india_vix", 0.0))
             risk_mult = RISK_MANAGER.get_adjusted_risk_multiplier(india_vix=vix)
             
             base_risk_pct = custom_risk_percent or ORDER_CONFIG.get("default_risk_per_trade_percent", 1.0)
-            effective_risk_pct = base_risk_pct * risk_mult
+            effective_risk_pct = float(base_risk_pct) * risk_mult
 
             # 4. Calculate Dynamic Stop Loss & Target Price
-            atr = signal_payload.get("atr", price * 0.01) # Default 1% if ATR missing
+            atr = float(signal_payload.get("atr", price * 0.01))  # Default 1% if ATR missing
             if atr <= 0:
                 atr = price * 0.01
 
-            rr_ratio = ORDER_CONFIG.get("risk_reward_ratio", 2.0)
-            sl_atr_mult = ORDER_CONFIG.get("trailing_sl_atr_multiplier", 1.5)
+            rr_ratio = float(ORDER_CONFIG.get("risk_reward_ratio", 2.0))
+            sl_atr_mult = float(ORDER_CONFIG.get("trailing_sl_atr_multiplier", 1.5))
 
             if action == TradeAction.BUY:
                 stop_loss = round(price - (sl_atr_mult * atr), 2)
                 target = round(price + (sl_atr_mult * atr * rr_ratio), 2)
-            else: # SELL
+            else:  # SELL
                 stop_loss = round(price + (sl_atr_mult * atr), 2)
                 target = round(price - (sl_atr_mult * atr * rr_ratio), 2)
 
@@ -209,6 +213,8 @@ class OrderManager:
                                 "reason": f"Broker Rejected Order: {err_msg}",
                                 "order_id": order_id,
                             }
+                        if "broker_order_id" in broker_response:
+                            order_data["broker_order_id"] = broker_response["broker_order_id"]
                 except Exception as e:
                     LOGGER.error(f"BROKER GATEWAY ERROR for {symbol}: {str(e)}", exc_info=True)
                     return {
@@ -257,13 +263,14 @@ class OrderManager:
                 # Fallback to full exit if percentage rounds to full or zero
                 return self.close_position(symbol=symbol, exit_price=exit_price, reason=reason)
 
-            entry_price = pos["entry_price"]
+            entry_price = float(pos["entry_price"])
+            exit_price = float(exit_price)
             action = pos["action"]
 
             # Calculate Partial Realized PnL
             if action == TradeAction.BUY.value:
                 partial_pnl = (exit_price - entry_price) * exit_qty
-            else: # SELL
+            else:  # SELL
                 partial_pnl = (entry_price - exit_price) * exit_qty
 
             pos["remaining_qty"] -= exit_qty
@@ -277,7 +284,12 @@ class OrderManager:
             # Broker Partial Exit Sync
             if BROKER_GATEWAY and hasattr(BROKER_GATEWAY, "close_position"):
                 try:
-                    BROKER_GATEWAY.close_position(symbol=symbol, qty=exit_qty)
+                    BROKER_GATEWAY.close_position(
+                        symbol=symbol,
+                        qty=exit_qty,
+                        order_id=pos.get("order_id"),
+                        action=action,
+                    )
                 except Exception as e:
                     LOGGER.error(f"BROKER PARTIAL CLOSE ERROR for {symbol}: {str(e)}", exc_info=True)
 
@@ -304,13 +316,14 @@ class OrderManager:
 
             order_id = pos.get("order_id")
             remaining_qty = pos["remaining_qty"]
-            entry_price = pos["entry_price"]
+            entry_price = float(pos["entry_price"])
+            exit_price = float(exit_price)
             action = pos["action"]
 
             # Calculate Final Realized PnL
             if action == TradeAction.BUY.value:
                 final_pnl = (exit_price - entry_price) * remaining_qty
-            else: # SELL
+            else:  # SELL
                 final_pnl = (entry_price - exit_price) * remaining_qty
 
             total_pnl = round(pos["realized_pnl"] + final_pnl, 2)
@@ -322,13 +335,16 @@ class OrderManager:
             pos["close_reason"] = reason
             pos["closed_at"] = datetime.now().isoformat()
 
-            # Active Order Cleanup & Archiving
+            # Active Order Cleanup & Archiving with Memory Cap Limit
             if order_id and order_id in self.active_orders:
                 archived_order = self.active_orders.pop(order_id)
                 archived_order.update(pos)
                 self.order_history.append(archived_order)
             else:
                 self.order_history.append(pos)
+
+            if len(self.order_history) > self.max_history_records:
+                self.order_history = self.order_history[-self.max_history_records:]
 
             # Update Account State in Risk Governance Engine
             current_bal = RISK_MANAGER.current_balance + final_pnl
@@ -340,7 +356,12 @@ class OrderManager:
             # Sync with Broker Gateway if available with Exception Handling
             if BROKER_GATEWAY and hasattr(BROKER_GATEWAY, "close_position"):
                 try:
-                    BROKER_GATEWAY.close_position(symbol=symbol, qty=remaining_qty)
+                    BROKER_GATEWAY.close_position(
+                        symbol=symbol,
+                        qty=remaining_qty,
+                        order_id=order_id,
+                        action=action,
+                    )
                 except Exception as e:
                     LOGGER.error(f"BROKER CLOSE POSITION ERROR for {symbol}: {str(e)}", exc_info=True)
 

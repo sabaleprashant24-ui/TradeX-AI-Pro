@@ -11,14 +11,11 @@ Provides Vectorized Technical Indicator Calculations & Master Dataset Pipeline:
 Compatible with Python 3.13 and Pydroid 3.
 """
 
-import logging
 from typing import Dict, Tuple, Union
 import numpy as np
 import pandas as pd
 
 from logger import LOGGER
-
-logger = logging.getLogger("TradeX_Indicators")
 
 
 class TechnicalIndicators:
@@ -390,5 +387,5 @@ class TechnicalIndicators:
         )
 
 
-# Global Technical Indicators Instance
+# Global Technical Indicators Instance (Required by strategies.py & other modules)
 INDICATORS = TechnicalIndicators()

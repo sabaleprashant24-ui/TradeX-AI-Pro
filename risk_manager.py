@@ -7,6 +7,7 @@ Provides Enterprise-Grade Capital Protection & Portfolio Risk Governance:
 - Thread-Safe Shared State Management using Re-entrant Lock (threading.RLock)
 - Dynamic Daily Loss Breaker & Profit Protection Lock (50% Profit Retention)
 - Strict Consecutive Loss Cooldown Engine (Time-based Block)
+- Dynamic Position Sizing Calculation
 - Granular Exposure Controls (Symbol, Sector, Option CE/PE, Overnight Limits)
 - Dynamic Volatility Sizing (ATR % & India VIX Matrix)
 
@@ -14,29 +15,42 @@ Compatible with Python 3.13 and Pydroid 3.
 """
 
 from datetime import datetime, date, timedelta
-import logging
+import math
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 from logger import LOGGER
 
-# Safe Config Import with Defaults
+# Safe Config Import with Defaults Fallback
 try:
-    from config import RISK_CONFIG
-except ImportError:
+    from config import CONFIG
+    _rc = CONFIG.risk
     RISK_CONFIG = {
-        "max_daily_loss_percent": 5.0,        # Stop trading if daily loss reaches 5%
-        "max_drawdown_percent": 10.0,         # Absolute account drawdown limit
-        "max_consecutive_losses": 3,          # Max back-to-back losses before cooldown
-        "cooldown_minutes": 30,               # Cooldown period in minutes
-        "profit_lock_threshold_percent": 3.0, # Lock profit if daily gain exceeds 3%
-        
-        # Exposure Limits (% of Total Capital)
-        "max_symbol_exposure_percent": 20.0,   # Max per single stock/symbol
-        "max_sector_exposure_percent": 35.0,   # Max per sector (e.g. IT, BANKING)
-        "max_options_ce_exposure_percent": 30.0, # Max total Call Options exposure
-        "max_options_pe_exposure_percent": 30.0, # Max total Put Options exposure
-        "max_overnight_exposure_percent": 40.0, # Max capital carried overnight
+        "max_daily_loss_percent": getattr(_rc, "max_daily_loss_pct", 2.0),
+        "max_drawdown_percent": 10.0,
+        "max_consecutive_losses": 3,
+        "cooldown_minutes": 30,
+        "profit_lock_threshold_percent": 3.0,
+        "max_symbol_exposure_percent": 20.0,
+        "max_sector_exposure_percent": 35.0,
+        "max_options_ce_exposure_percent": 30.0,
+        "max_options_pe_exposure_percent": 30.0,
+        "max_overnight_exposure_percent": 40.0,
+        "risk_per_trade_pct": getattr(_rc, "risk_per_trade_pct", 1.0),
+    }
+except (ImportError, AttributeError):
+    RISK_CONFIG = {
+        "max_daily_loss_percent": 2.0,
+        "max_drawdown_percent": 10.0,
+        "max_consecutive_losses": 3,
+        "cooldown_minutes": 30,
+        "profit_lock_threshold_percent": 3.0,
+        "max_symbol_exposure_percent": 20.0,
+        "max_sector_exposure_percent": 35.0,
+        "max_options_ce_exposure_percent": 30.0,
+        "max_options_pe_exposure_percent": 30.0,
+        "max_overnight_exposure_percent": 40.0,
+        "risk_per_trade_pct": 1.0,
     }
 
 
@@ -46,9 +60,7 @@ class ConfigValidationError(ValueError):
 
 
 def validate_risk_config(config: Dict[str, Any]) -> None:
-    """
-    Validates Risk Configuration metrics at startup to ensure parameters stay within logical ranges.
-    """
+    """Validates Risk Configuration metrics at startup to ensure parameters stay within logical ranges."""
     percentage_keys = [
         "max_daily_loss_percent",
         "max_drawdown_percent",
@@ -58,6 +70,7 @@ def validate_risk_config(config: Dict[str, Any]) -> None:
         "max_options_ce_exposure_percent",
         "max_options_pe_exposure_percent",
         "max_overnight_exposure_percent",
+        "risk_per_trade_pct",
     ]
 
     for key in percentage_keys:
@@ -75,26 +88,23 @@ def validate_risk_config(config: Dict[str, Any]) -> None:
             if not isinstance(val, int) or val <= 0:
                 raise ConfigValidationError(f"Invalid value for {key}: ({val}). Must be a positive integer.")
 
-    LOGGER.info("RISK CONFIG VALIDATION PASSED: All parameters are safe and within valid boundaries.")
+    LOGGER.info("RISK CONFIG VALIDATION PASSED: All risk parameters are safe and verified.")
 
 
 # Execute Config Validation at Module Import
 validate_risk_config(RISK_CONFIG)
-
-logger = logging.getLogger("TradeX_RiskManager")
 
 
 class PortfolioRiskManager:
     """Enterprise Risk Governance Engine for Capital Protection (Thread-Safe via RLock)."""
 
     def __init__(self, initial_capital: float = 100000.0):
-        # Re-entrant Lock to prevent self-deadlocks on nested method calls
         self._lock = threading.RLock()
 
-        self.initial_capital = initial_capital
-        self.starting_daily_balance = initial_capital
-        self.current_balance = initial_capital
-        self.peak_balance = initial_capital
+        self.initial_capital = float(initial_capital)
+        self.starting_daily_balance = float(initial_capital)
+        self.current_balance = float(initial_capital)
+        self.peak_balance = float(initial_capital)
         
         self.daily_pnl: float = 0.0
         self.peak_daily_profit: float = 0.0
@@ -120,23 +130,20 @@ class PortfolioRiskManager:
             self.lock_reason = ""
 
     def update_account_state(self, current_balance: float, closed_pnl: float) -> Dict[str, Any]:
-        """
-        Thread-safe update of account balance, daily PnL, profit locks & cooldowns.
-        Call this every time a position is closed.
-        """
+        """Thread-safe update of account balance, daily PnL, profit locks & cooldowns."""
         with self._lock:
             self._check_and_reset_daily_stats()
 
-            self.current_balance = current_balance
-            self.daily_pnl += closed_pnl
+            self.current_balance = float(current_balance)
+            self.daily_pnl += float(closed_pnl)
 
             # Track Peak Daily Profit for Profit Lock
             if self.daily_pnl > self.peak_daily_profit:
                 self.peak_daily_profit = self.daily_pnl
 
             # Track Overall Peak Balance for Drawdown calculation
-            if current_balance > self.peak_balance:
-                self.peak_balance = current_balance
+            if self.current_balance > self.peak_balance:
+                self.peak_balance = self.current_balance
 
             # Consecutive Loss & Cooldown Logic
             if closed_pnl < 0:
@@ -160,7 +167,7 @@ class PortfolioRiskManager:
             return
 
         # 1. Daily Max Loss Limit Check
-        max_daily_loss = self.starting_daily_balance * (RISK_CONFIG.get("max_daily_loss_percent", 5.0) / 100.0)
+        max_daily_loss = self.starting_daily_balance * (RISK_CONFIG.get("max_daily_loss_percent", 2.0) / 100.0)
         if self.daily_pnl <= -max_daily_loss:
             self.trading_locked = True
             self.lock_reason = f"DAILY LOSS LIMIT BREACHED (-₹{abs(self.daily_pnl):.2f} >= ₹{max_daily_loss:.2f})"
@@ -169,7 +176,7 @@ class PortfolioRiskManager:
 
         # 2. Maximum Drawdown Check
         max_dd_percent = RISK_CONFIG.get("max_drawdown_percent", 10.0)
-        current_drawdown = ((self.peak_balance - self.current_balance) / self.peak_balance) * 100.0
+        current_drawdown = ((self.peak_balance - self.current_balance) / self.peak_balance) * 100.0 if self.peak_balance > 0 else 0.0
         if current_drawdown >= max_dd_percent:
             self.trading_locked = True
             self.lock_reason = f"MAX DRAWDOWN BREACHED ({current_drawdown:.2f}% >= {max_dd_percent}%)"
@@ -192,9 +199,7 @@ class PortfolioRiskManager:
         atr_percent: float = 0.0,
         india_vix: float = 0.0,
     ) -> float:
-        """
-        Thread-safe calculation of dynamic risk multiplier based on ATR %, India VIX, and Daily Profit State.
-        """
+        """Thread-safe calculation of dynamic risk multiplier based on ATR %, India VIX, and Profit State."""
         with self._lock:
             multiplier = 1.0
 
@@ -214,18 +219,46 @@ class PortfolioRiskManager:
 
             return round(multiplier, 2)
 
+    def calculate_position_size(
+        self,
+        entry_price: float,
+        stop_loss_price: float,
+        lot_size: int = 1,
+        risk_multiplier: float = 1.0,
+    ) -> int:
+        """Calculates lot-adjusted quantity based on risk per trade and stop loss points."""
+        with self._lock:
+            if entry_price <= 0 or stop_loss_price <= 0:
+                return 0
+
+            risk_per_share = abs(entry_price - stop_loss_price)
+            if risk_per_share == 0:
+                return 0
+
+            base_risk_pct = RISK_CONFIG.get("risk_per_trade_pct", 1.0)
+            max_risk_amount = self.current_balance * (base_risk_pct / 100.0) * risk_multiplier
+
+            raw_qty = max_risk_amount / risk_per_share
+
+            # Round down to nearest valid lot size
+            if lot_size > 1:
+                number_of_lots = math.floor(raw_qty / lot_size)
+                final_qty = number_of_lots * lot_size
+            else:
+                final_qty = math.floor(raw_qty)
+
+            return max(final_qty, 0)
+
     def can_trade(
         self,
         requested_capital: float = 0.0,
         symbol: str = "",
         sector: str = "",
-        option_type: str = "NONE", # "CE", "PE", or "NONE"
+        option_type: str = "NONE",  # "CE", "PE", or "NONE"
         is_overnight: bool = False,
-        active_positions_metadata: Optional[list] = None,
+        active_positions_metadata: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """
-        Thread-safe Gatekeeper: Validates Circuit Breaker, Cooldown, Symbol/Sector/Options/Overnight Exposure.
-        """
+        """Thread-safe Gatekeeper: Validates Circuit Breaker, Cooldown, Symbol/Sector/Options/Overnight Exposure."""
         with self._lock:
             self._check_and_reset_daily_stats()
 
@@ -242,11 +275,18 @@ class PortfolioRiskManager:
                 }
 
             active_positions_metadata = active_positions_metadata or []
+            symbol_upper = symbol.upper() if symbol else ""
+            sector_upper = sector.upper() if sector else ""
+            opt_type_upper = option_type.upper() if option_type else "NONE"
 
             # 3. Symbol Exposure Limit
             max_sym_pct = RISK_CONFIG.get("max_symbol_exposure_percent", 20.0)
             max_allowed_sym = self.current_balance * (max_sym_pct / 100.0)
-            existing_sym_cap = sum(pos.get("capital", 0.0) for pos in active_positions_metadata if pos.get("symbol") == symbol)
+            existing_sym_cap = sum(
+                float(pos.get("capital", 0.0))
+                for pos in active_positions_metadata
+                if str(pos.get("symbol", "")).upper() == symbol_upper
+            )
             if (existing_sym_cap + requested_capital) > max_allowed_sym:
                 return {
                     "allowed": False,
@@ -254,10 +294,14 @@ class PortfolioRiskManager:
                 }
 
             # 4. Sector Exposure Limit
-            if sector:
+            if sector_upper and sector_upper != "GENERAL":
                 max_sec_pct = RISK_CONFIG.get("max_sector_exposure_percent", 35.0)
                 max_allowed_sec = self.current_balance * (max_sec_pct / 100.0)
-                existing_sec_cap = sum(pos.get("capital", 0.0) for pos in active_positions_metadata if pos.get("sector") == sector.upper())
+                existing_sec_cap = sum(
+                    float(pos.get("capital", 0.0))
+                    for pos in active_positions_metadata
+                    if str(pos.get("sector", "")).upper() == sector_upper
+                )
                 if (existing_sec_cap + requested_capital) > max_allowed_sec:
                     return {
                         "allowed": False,
@@ -265,22 +309,30 @@ class PortfolioRiskManager:
                     }
 
             # 5. Options CE / PE Directional Exposure Limit
-            if option_type.upper() in ["CE", "PE"]:
-                opt_key = f"max_options_{option_type.lower()}_exposure_percent"
+            if opt_type_upper in ["CE", "PE"]:
+                opt_key = f"max_options_{opt_type_upper.lower()}_exposure_percent"
                 max_opt_pct = RISK_CONFIG.get(opt_key, 30.0)
                 max_allowed_opt = self.current_balance * (max_opt_pct / 100.0)
-                existing_opt_cap = sum(pos.get("capital", 0.0) for pos in active_positions_metadata if pos.get("option_type") == option_type.upper())
+                existing_opt_cap = sum(
+                    float(pos.get("capital", 0.0))
+                    for pos in active_positions_metadata
+                    if str(pos.get("option_type", "")).upper() == opt_type_upper
+                )
                 if (existing_opt_cap + requested_capital) > max_allowed_opt:
                     return {
                         "allowed": False,
-                        "reason": f"OPTION {option_type.upper()} EXPOSURE BREACHED: Total ₹{existing_opt_cap + requested_capital:.2f} exceeds limit ₹{max_allowed_opt:.2f}.",
+                        "reason": f"OPTION {opt_type_upper} EXPOSURE BREACHED: Total ₹{existing_opt_cap + requested_capital:.2f} exceeds limit ₹{max_allowed_opt:.2f}.",
                     }
 
             # 6. Overnight Exposure Limit
             if is_overnight:
                 max_ovn_pct = RISK_CONFIG.get("max_overnight_exposure_percent", 40.0)
                 max_allowed_ovn = self.current_balance * (max_ovn_pct / 100.0)
-                existing_ovn_cap = sum(pos.get("capital", 0.0) for pos in active_positions_metadata if pos.get("is_overnight", False))
+                existing_ovn_cap = sum(
+                    float(pos.get("capital", 0.0))
+                    for pos in active_positions_metadata
+                    if bool(pos.get("is_overnight", False))
+                )
                 if (existing_ovn_cap + requested_capital) > max_allowed_ovn:
                     return {
                         "allowed": False,
@@ -308,5 +360,7 @@ class PortfolioRiskManager:
             }
 
 
-# Global Risk Manager Singleton Instance
+# Backwards Compatibility Alias and Singleton Instance Creation
+RiskManager = PortfolioRiskManager
 RISK_MANAGER = PortfolioRiskManager()
+risk = RISK_MANAGER

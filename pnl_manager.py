@@ -39,7 +39,7 @@ class PnLManager:
         self.current_capital = initial_capital
         self.config = charge_config if charge_config else DEFAULT_CHARGE_CONFIG
         self.db_path = db_path
-        self._db_lock = threading.Lock()  # Thread-safety lock for concurrent threads
+        self._db_lock = threading.RLock()  # Allows nested DB helper calls during startup
         
         # Initialize Database Engine
         self._init_db()
@@ -362,3 +362,6 @@ class PnLManager:
         except Exception as e:
             logger.error(f"Excel Export Error: {e}")
             return False
+
+
+pnl = PnLManager()

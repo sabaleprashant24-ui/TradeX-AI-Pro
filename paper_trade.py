@@ -14,14 +14,11 @@ Provides Production-Grade Simulation:
 Compatible with Python 3.13 and Pydroid 3.
 """
 
-from datetime import datetime, time, date
+from datetime import datetime, time
 import logging
-import math
 import threading
 from typing import Dict, Any, List, Optional
 import uuid
-
-from logger import LOGGER
 
 # Safe Config Import
 try:
@@ -33,6 +30,8 @@ except ImportError:
         "broker_model": "ANGEL_ONE",     # ANGEL_ONE | ZERODHA | CUSTOM
         "validate_market_hours": True,
     }
+
+LOGGER = logging.getLogger("TradeX_PaperTrade")
 
 
 class OrderStatus:
@@ -60,14 +59,17 @@ class PaperTradeEngine:
         # Order Book & History
         self.order_book: Dict[str, Dict[str, Any]] = {}
         self.trade_history: List[Dict[str, Any]] = []
+        
+        # Equity Curve Ring Buffer Limit (Prevents Memory Leaks)
+        self.max_equity_points = 2000
         self.equity_curve: List[Dict[str, Any]] = [
             {"timestamp": datetime.now().isoformat(), "equity": self.initial_capital}
         ]
 
         # Config Settings
         self.slippage_pct = float(PAPER_CONFIG.get("slippage_percentage", 0.0005))
-        self.broker_model = PAPER_CONFIG.get("broker_model", "ANGEL_ONE").upper()
-        self.validate_hours = PAPER_CONFIG.get("validate_market_hours", True)
+        self.broker_model = str(PAPER_CONFIG.get("broker_model", "ANGEL_ONE")).upper()
+        self.validate_hours = bool(PAPER_CONFIG.get("validate_market_hours", True))
 
         LOGGER.info(f"PAPER ENGINE INITIALIZED: Capital = ₹{self.initial_capital:,.2f} | Broker Model = {self.broker_model}")
 
@@ -94,9 +96,7 @@ class PaperTradeEngine:
     # 2. CONFIGURABLE BROKERAGE MODELS
     # ==========================================
     def _calculate_charges(self, action: str, trade_value: float, product_type: str = "INTRADAY") -> float:
-        """
-        Calculates brokerage + regulatory charges based on selected broker model.
-        """
+        """Calculates brokerage + regulatory charges based on selected broker model."""
         stt = 0.0
         brokerage = 0.0
 
@@ -181,7 +181,6 @@ class PaperTradeEngine:
             product_type = str(payload.get("product_type", "INTRADAY")).upper()
             exchange = str(payload.get("exchange", "NSE")).upper()
 
-            # Order Record Initialisation
             order_record = {
                 "order_id": paper_id,
                 "symbol": symbol,
@@ -197,7 +196,6 @@ class PaperTradeEngine:
             }
             self.order_book[paper_id] = order_record
 
-            # Check Market Hours
             if not self.is_market_open(exchange):
                 order_record["status"] = OrderStatus.REJECTED
                 order_record["rejection_reason"] = "Market is closed."
@@ -209,14 +207,12 @@ class PaperTradeEngine:
                 order_record["rejection_reason"] = "Invalid Qty or Price."
                 return {"success": False, "order_id": paper_id, "status": OrderStatus.REJECTED, "message": "Invalid Qty or Price."}
 
-            # Apply Slippage
             execution_price = requested_price * (1 + self.slippage_pct) if action == "BUY" else requested_price * (1 - self.slippage_pct)
             trade_value = execution_price * qty
             
             margin_required = self._calculate_margin_required(action, trade_value, product_type, exchange)
             charges = self._calculate_charges(action, trade_value, product_type)
 
-            # Check Margin
             if (margin_required + charges) > self.free_margin:
                 msg = f"Insufficient Free Margin. Required: ₹{margin_required + charges:,.2f}, Free: ₹{self.free_margin:,.2f}"
                 order_record["status"] = OrderStatus.REJECTED
@@ -224,7 +220,7 @@ class PaperTradeEngine:
                 LOGGER.warning(f"ORDER REJECTED [{paper_id}]: {msg}")
                 return {"success": False, "order_id": paper_id, "status": OrderStatus.REJECTED, "message": msg}
 
-            # Deduct Charges and Lock Capital
+            # Account Deductions
             self.cash_balance -= charges
             if product_type == "DELIVERY" and action == "BUY":
                 self.cash_balance -= trade_value
@@ -233,12 +229,10 @@ class PaperTradeEngine:
                 self.used_margin += margin_required
                 locked_margin = margin_required
 
-            # Mark Order FILLED
             order_record["status"] = OrderStatus.FILLED
             order_record["filled_qty"] = qty
             order_record["execution_price"] = round(execution_price, 2)
 
-            # Create Open Position Object
             position_obj = {
                 "paper_id": paper_id,
                 "symbol": symbol,
@@ -288,12 +282,7 @@ class PaperTradeEngine:
     # 5. CORPORATE ACTIONS SIMULATOR (DELIVERY)
     # ==========================================
     def apply_corporate_action(self, symbol: str, action_type: str, value: float) -> Dict[str, Any]:
-        """
-        Simulates Corporate Actions on Delivery Positions.
-        - SPLIT: Ratio (e.g., 2.0 for 1:2 split). Doubles Qty, Halves Entry Price.
-        - BONUS: Ratio (e.g., 1.0 for 1:1 bonus). Adds free shares, reduces average cost.
-        - DIVIDEND: Cash Dividend per share credited to Cash Balance.
-        """
+        """Simulates Corporate Actions on Delivery Positions."""
         with self._lock:
             affected_count = 0
             action_type = action_type.upper()
@@ -303,13 +292,11 @@ class PaperTradeEngine:
                     affected_count += 1
 
                     if action_type == "SPLIT":
-                        # Value = Split ratio (e.g., 2 means 1 share split into 2)
                         pos["qty"] = int(pos["qty"] * value)
                         pos["entry_price"] = round(pos["entry_price"] / value, 2)
                         LOGGER.info(f"CORPORATE ACTION [SPLIT] applied on {symbol}: New Qty = {pos['qty']}, New Entry = ₹{pos['entry_price']}")
 
                     elif action_type == "BONUS":
-                        # Value = Bonus ratio (e.g., 1 means 1 extra share per 1 held)
                         new_qty = pos["qty"] + int(pos["qty"] * value)
                         total_cost = pos["qty"] * pos["entry_price"]
                         pos["qty"] = new_qty
@@ -317,7 +304,6 @@ class PaperTradeEngine:
                         LOGGER.info(f"CORPORATE ACTION [BONUS] applied on {symbol}: New Qty = {pos['qty']}, Adjusted Entry = ₹{pos['entry_price']}")
 
                     elif action_type == "DIVIDEND":
-                        # Value = Cash Dividend per share
                         total_dividend = pos["qty"] * value
                         self.cash_balance += total_dividend
                         LOGGER.info(f"CORPORATE ACTION [DIVIDEND] credited ₹{total_dividend:,.2f} for {symbol}")
@@ -329,6 +315,7 @@ class PaperTradeEngine:
     # 6. LIVE MTM & PARTIAL EXITS
     # ==========================================
     def update_ltp(self, symbol: str, current_ltp: float):
+        """Updates Mark-To-Market (MTM) PnL per active ticker position."""
         with self._lock:
             for paper_id, pos in self.open_positions.items():
                 if pos["symbol"] == symbol:
@@ -337,6 +324,7 @@ class PaperTradeEngine:
                     pos["unrealized_pnl"] = round(pnl, 2)
 
     def close_position(self, paper_id: str, exit_price: float, exit_qty: Optional[int] = None) -> Dict[str, Any]:
+        """Closes position fully or partially and reconciles cash/margins safely."""
         with self._lock:
             if paper_id not in self.open_positions:
                 return {"success": False, "message": f"Position ID {paper_id} not found."}
@@ -351,6 +339,10 @@ class PaperTradeEngine:
 
             gross_pnl = (executed_exit - pos["entry_price"]) * qty_to_close if pos["action"] == "BUY" else (pos["entry_price"] - executed_exit) * qty_to_close
             net_pnl = gross_pnl - exit_charges
+
+            # Correct Proportional Entry Charges Accounting
+            proportional_entry_charge = (pos["charges_paid"] / pos["initial_qty"]) * qty_to_close
+            total_trade_charges = proportional_entry_charge + exit_charges
 
             if pos["product_type"] == "DELIVERY" and pos["action"] == "BUY":
                 self.cash_balance += (trade_value - exit_charges)
@@ -367,7 +359,7 @@ class PaperTradeEngine:
                 "entry_price": pos["entry_price"],
                 "exit_price": round(executed_exit, 2),
                 "gross_pnl": round(gross_pnl, 2),
-                "charges": round(pos["charges_paid"] + exit_charges, 2),
+                "charges": round(total_trade_charges, 2),
                 "net_pnl": round(net_pnl, 2),
                 "entry_time": pos["entry_time"],
                 "exit_time": datetime.now().isoformat(),
@@ -412,7 +404,10 @@ class PaperTradeEngine:
             }
 
     def _update_equity_curve(self):
+        """Appends to equity curve using bounded buffer memory limit."""
         self.equity_curve.append({"timestamp": datetime.now().isoformat(), "equity": round(self.total_equity, 2)})
+        if len(self.equity_curve) > self.max_equity_points:
+            self.equity_curve.pop(0)
 
     def _calculate_max_drawdown(self) -> float:
         if not self.equity_curve:
@@ -434,4 +429,19 @@ class PaperTradeEngine:
 
 
 # Global Paper Engine Singleton Instance
-PAPER_ENGINE = PaperTradeEngine()
+class PaperTrader(PaperTradeEngine):
+    def execute_paper_order(self, symbol: str, signal_type: str, qty: int, price: float) -> Dict[str, Any]:
+        return self.place_order(
+            {
+                "symbol": symbol,
+                "action": signal_type,
+                "qty": qty,
+                "entry_price": price,
+                "product_type": "INTRADAY",
+                "exchange": "NSE",
+            }
+        )
+
+
+PAPER_ENGINE = PaperTrader()
+paper = PAPER_ENGINE

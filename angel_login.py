@@ -12,27 +12,37 @@ Compatible with Python 3.13 and Pydroid 3.
 
 from datetime import datetime, timedelta
 import json
-import logging
 import os
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Union
 import pyotp
 
-# SmartConnect & WebSocket imports
-try:
-    from SmartApi import SmartConnect
-    from SmartApi.smartWebSocketV2 import SmartWebSocketV2
-except ImportError:
-    SmartConnect = None
-    SmartWebSocketV2 = None
+SmartConnect = None
+SmartWebSocketV2 = None
+
+
+def _load_smartapi() -> bool:
+    global SmartConnect, SmartWebSocketV2
+
+    if SmartConnect and SmartWebSocketV2:
+        return True
+
+    try:
+        from SmartApi import SmartConnect as smart_connect_factory
+        from SmartApi.smartWebSocketV2 import SmartWebSocketV2 as smart_websocket_factory
+
+        SmartConnect = smart_connect_factory
+        SmartWebSocketV2 = smart_websocket_factory
+        return True
+    except ImportError:
+        SmartConnect = None
+        SmartWebSocketV2 = None
+        return False
 
 from config import CONFIG
 from logger import LOGGER
 from utils import retry
-
-logger = logging.getLogger("TradeX_AngelAPI")
-
 
 # Human Readable Broker Error Code Mapping
 ERROR_CODE_MAP = {
@@ -97,7 +107,7 @@ class AngelOneAPI:
     @retry(max_retries=3, delay=2.0)
     def connect(self) -> bool:
         """Authenticates with SmartAPI, retrieves tokens, and starts auto refresh thread."""
-        if SmartConnect is None:
+        if not _load_smartapi():
             LOGGER.warning(
                 "SmartApi library not installed. Running in Mock/Simulated Connection Mode."
             )
@@ -132,10 +142,11 @@ class AngelOneAPI:
                 self._start_auto_token_refresh()
                 return True
             else:
-                err_code = data.get("errorcode", "AB1001")
+                err_code = data.get("errorcode", "AB1001") if data else "AB1001"
                 err_desc = self.get_error_message(err_code)
+                msg = data.get('message') if data else "No response"
                 LOGGER.error(
-                    f"Angel One Login Failed [{err_code}]: {err_desc} - {data.get('message')}"
+                    f"Angel One Login Failed [{err_code}]: {err_desc} - {msg}"
                 )
                 self.is_connected = False
                 return False
@@ -258,7 +269,6 @@ class AngelOneAPI:
             return {"ltp": 0.0, "oi": 0, "oi_change": 0, "volume": 0}
 
         try:
-            # SmartAPI full market quote mode
             res = self.smart_api.getMarketData(
                 mode="FULL", exchangeTokens={exchange: [token]}
             )
@@ -328,7 +338,7 @@ class AngelOneAPI:
         on_tick: Callable[[Dict[str, Any]], None],
     ):
         """Starts SmartWebSocket V2 with exponential backoff and max reconnect limit."""
-        if SmartWebSocketV2 is None:
+        if not _load_smartapi() or SmartWebSocketV2 is None:
             LOGGER.warning("SmartWebSocketV2 library unavailable.")
             return
 
@@ -342,7 +352,7 @@ class AngelOneAPI:
         def _on_open(wsapp):
             LOGGER.info("WebSocket Connected successfully! Resetting reconnect counter.")
             self.ws_connected = True
-            self.reconnect_counter = 0  # Reset counter on successful connection
+            self.reconnect_counter = 0
             mode = 1  # 1: LTP, 2: Quote, 3: SnapQuote
             self.ws_client.subscribe("tradex_sub", mode, self.active_token_list)
 
@@ -394,13 +404,11 @@ class AngelOneAPI:
         """Safely stops threads, closes active WebSocket, and terminates session."""
         LOGGER.info("Initiating Graceful Shutdown of AngelOneAPI...")
 
-        # 1. Stop Token Refresh Thread
         self._stop_refresh_event.set()
         if self._refresh_thread and self._refresh_thread.is_alive():
             self._refresh_thread.join(timeout=2.0)
             LOGGER.info("Background Auto Refresh Thread stopped.")
 
-        # 2. Close WebSocket Connection
         if self.ws_client:
             try:
                 if hasattr(self.ws_client, "close_connection"):
@@ -409,7 +417,6 @@ class AngelOneAPI:
             except Exception as e:
                 LOGGER.error(f"Error closing WebSocket: {e}")
 
-        # 3. Reset State
         self.ws_connected = False
         self.is_connected = False
         LOGGER.info("AngelOneAPI disconnected cleanly.")
@@ -562,3 +569,4 @@ class AngelOneAPI:
 
 # Global Angel API Instance
 ANGEL_API = AngelOneAPI()
+angel_api = ANGEL_API

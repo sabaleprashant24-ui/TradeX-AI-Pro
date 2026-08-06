@@ -4,32 +4,40 @@ File: dashboard.py
 
 Production Architecture:
 Authentication (RBAC) -> Settings Persistence -> Broker Bridge -> Market Engine (with Circuit Breaker) -> Option Adapter -> Core Backtester
-
-Design Philosophy:
-- Clean Architecture (Direct Imports & Fail-Fast Pattern)
-- Network Resilience & Circuit Breaker Pattern for External Data Feeds
-- Zero Duplicate Logic
 """
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
+import math
 import json
 import os
-import math
-import requests
 import time
+import requests
+import numpy as np
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+import streamlit as st
+from datetime import datetime, timedelta
 from scipy.stats import norm
 
-# Direct Import from Core Modules (Clean Architecture)
+# Direct Import from Core Modules
 from backtester import Backtester, SECTOR_MAP
 import yfinance as yf
 
 # ==========================================
-# 1. SETTINGS PERSISTENCE ENGINE
+# 0. PAGE CONFIGURATION (MUST BE VERY FIRST ST COMMAND)
+# ==========================================
+st.set_page_config(page_title="TradeX AI Pro v4.0", page_icon="⚡", layout="wide")
+
+# Custom UI CSS
+st.markdown("""
+    <style>
+    .main { background-color: #0e1117; }
+    .stMetric { background-color: #1e222d; padding: 12px; border-radius: 8px; border: 1px solid #2a2e39; }
+    </style>
+""", unsafe_allow_html=True)
+
+# ==========================================
+# 1. SETTINGS PERSISTENCE & SESSION INIT
 # ==========================================
 CONFIG_FILE = "dashboard_settings.json"
 
@@ -60,12 +68,17 @@ def save_settings(settings_dict):
     except Exception as e:
         st.error(f"Settings Save Error: {e}")
 
+# Early Session State Initializations
 if "app_settings" not in st.session_state:
     st.session_state["app_settings"] = load_settings()
 
-# In-Memory Cache for Circuit Breaker Pattern
 if "market_data_cache" not in st.session_state:
     st.session_state["market_data_cache"] = {}
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+    st.session_state["user_role"] = None
+    st.session_state["username"] = None
 
 # ==========================================
 # 2. AUTHENTICATION & RBAC ENGINE
@@ -77,11 +90,6 @@ USER_DB = {
 }
 
 def authenticate_user():
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
-        st.session_state["user_role"] = None
-        st.session_state["username"] = None
-
     if not st.session_state["authenticated"]:
         st.markdown("## 🔐 TradeX AI Pro v4.0 Login")
         col_l1, col_l2, col_l3 = st.columns([1, 2, 1])
@@ -89,7 +97,7 @@ def authenticate_user():
             st.info("Demo Credentials: admin/adminpassword123 | trader/traderpassword123 | viewer/viewerpassword123")
             user_input = st.text_input("Username")
             pass_input = st.text_input("Password", type="password")
-            login_btn = st.button("Unlock Station", type="primary", use_container_width=True)
+            login_btn = st.button("Unlock Station", type="primary", width="stretch")
 
             if login_btn:
                 if user_input in USER_DB and USER_DB[user_input]["password"] == pass_input:
@@ -103,8 +111,6 @@ def authenticate_user():
         return False
     return True
 
-st.set_page_config(page_title="TradeX AI Pro v4.0", page_icon="⚡", layout="wide")
-
 if not authenticate_user():
     st.stop()
 
@@ -114,13 +120,25 @@ def has_permission(required_role):
     req_perm = roles.get(required_role, 3)
     return user_perm >= req_perm
 
-# Custom UI CSS
-st.markdown("""
-    <style>
-    .main { background-color: #0e1117; }
-    .stMetric { background-color: #1e222d; padding: 12px; border-radius: 8px; border: 1px solid #2a2e39; }
-    </style>
-""", unsafe_allow_html=True)
+
+def render_feed_status_panel():
+    try:
+        from broker import LIVE_BROKER
+        from market_data import market_data
+
+        broker_health = LIVE_BROKER.get_health_status()
+        feed_health = market_data.get_feed_health()
+        st.subheader("Live Feed Status")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Feed", feed_health.get("status", "UNKNOWN"))
+        c2.metric("Connected", "YES" if feed_health.get("connected") else "NO")
+        c3.metric("Last Tick", feed_health.get("last_tick_timestamp") or broker_health.get("feed_last_tick_timestamp") or "-")
+        c4.metric("Latency", f"{feed_health.get('latency_ms', broker_health.get('feed_latency_ms', 0.0)):.2f} ms")
+    except Exception:
+        st.caption("Feed status unavailable in this session.")
+
+# Dashboard integration point for live feed monitoring
+render_feed_status_panel()
 
 # ==========================================
 # 3. BROKER API BRIDGE (ANGEL ONE / SMARTAPI COMPATIBLE)
@@ -205,7 +223,9 @@ class LiveBrokerBridge:
 # 4. LIVE OPTION CHAIN ENGINE WITH SAFE PARSING
 # ==========================================
 def calculate_option_greeks(S, K, T, r, sigma, option_type="CE"):
-    if T <= 0 or sigma <= 0 or S <= 0:
+    T = max(T, 1e-5)
+    sigma = max(sigma, 1e-4)
+    if S <= 0 or K <= 0:
         return {"delta": 0.0, "gamma": 0.0, "vega": 0.0, "theta": 0.0}
 
     d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
@@ -361,6 +381,65 @@ def ema_crossover_strategy(symbol: str, df: pd.DataFrame) -> dict:
 
     return {"signal": "HOLD", "reason": "No Crossover"}
 
+
+def get_dashboard_status_snapshot() -> dict:
+    """Builds a lightweight workstation status snapshot from existing APIs."""
+    snapshot = {
+        "indices": {},
+        "broker_status": "UNKNOWN",
+        "websocket_status": "DISCONNECTED",
+        "database_status": "OFFLINE",
+        "api_latency": 0.0,
+        "live_orders": 0,
+        "open_positions": 0,
+        "today_pnl": 0.0,
+        "session_info": f"{st.session_state.get('username', 'Guest')} ({st.session_state.get('user_role', 'Viewer')})",
+        "refresh_interval": 0,
+        "analytics": {},
+    }
+
+    try:
+        from broker import LIVE_BROKER
+        from market_data import market_data
+        from database import DB
+
+        broker_health = LIVE_BROKER.get_health_status()
+        feed_health = market_data.get_feed_health()
+        snapshot["broker_status"] = str(broker_health.get("status", "UNKNOWN")).upper()
+        snapshot["websocket_status"] = str(feed_health.get("status", "DISCONNECTED")).upper()
+        snapshot["api_latency"] = round(float(feed_health.get("latency_ms", broker_health.get("feed_latency_ms", 0.0)) or 0.0), 2)
+
+        try:
+            with DB.session() as conn:
+                order_count = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+                position_count = conn.execute("SELECT COUNT(*) FROM positions WHERE status = 'OPEN'").fetchone()[0]
+                today_pnl = conn.execute("SELECT COALESCE(SUM(pnl), 0.0) FROM trade_history WHERE date(entry_timestamp) = date('now')").fetchone()[0]
+            snapshot["database_status"] = "ONLINE"
+            snapshot["live_orders"] = int(order_count or 0)
+            snapshot["open_positions"] = int(position_count or 0)
+            snapshot["today_pnl"] = float(today_pnl or 0.0)
+        except Exception:
+            snapshot["database_status"] = "OFFLINE"
+
+        try:
+            from pnl_manager import pnl
+            snapshot["analytics"] = pnl.get_advanced_analytics()
+        except Exception:
+            snapshot["analytics"] = {}
+
+        try:
+            index_frames = fetch_live_market_data(["NIFTY", "BANKNIFTY"])
+            for symbol in ["NIFTY", "BANKNIFTY"]:
+                frame = index_frames.get(symbol)
+                if frame is not None and not frame.empty:
+                    snapshot["indices"][symbol] = float(frame.iloc[-1].get("close", frame.iloc[-1].get("Close", 0.0)))
+        except Exception:
+            snapshot["indices"] = {}
+    except Exception:
+        pass
+
+    return snapshot
+
 # ==========================================
 # 6. SIDEBAR CONTROLS & PERSISTENCE
 # ==========================================
@@ -414,6 +493,66 @@ if st.sidebar.button("💾 Save Settings", disabled=not has_permission("Admin"))
 st.title("⚡ TradeX AI Pro v4.0 — Institutional Station")
 st.caption(f"Mode: **{execution_mode}** | Broker: **{selected_broker}** | Refresh: **{auto_refresh_sec}s**")
 
+if auto_refresh_sec > 0:
+    st.autorefresh(interval=auto_refresh_sec * 1000, key="institutional_dashboard_refresh")
+
+snapshot = get_dashboard_status_snapshot()
+snapshot["refresh_interval"] = auto_refresh_sec
+
+st.markdown("### 🧭 Institutional Workstation")
+col_idx1, col_idx2, col_broker, col_ws, col_db = st.columns(5)
+col_idx1.metric("NIFTY", f"₹{snapshot['indices'].get('NIFTY', 0):,.2f}", help="Live NIFTY index")
+col_idx2.metric("BANKNIFTY", f"₹{snapshot['indices'].get('BANKNIFTY', 0):,.2f}", help="Live BANKNIFTY index")
+col_broker.metric("Broker Status", snapshot["broker_status"], help="Current broker connection state")
+col_ws.metric("WebSocket Status", snapshot["websocket_status"], help="Live feed connection state")
+col_db.metric("Database Status", snapshot["database_status"], help="SQLite persistence status")
+
+col_lat, col_orders, col_positions, col_pnl, col_session = st.columns(5)
+col_lat.metric("API Latency", f"{snapshot['api_latency']:.2f} ms", help="Feed latency from live stream")
+col_orders.metric("Live Orders", snapshot["live_orders"], help="Count of orders in the local database")
+col_positions.metric("Open Positions", snapshot["open_positions"], help="Count of open positions in the local database")
+col_pnl.metric("Today's PnL", f"₹{snapshot['today_pnl']:,.2f}", help="PnL from today's trade history")
+col_session.metric("Session", snapshot["session_info"], help="Current dashboard session")
+
+st.caption(f"Auto Refresh: every {auto_refresh_sec}s | Session: {snapshot['session_info']}")
+
+analytics = snapshot.get("analytics", {})
+if analytics:
+    st.markdown("### 📊 Professional Performance Reports")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Equity Curve", f"₹{snapshot['today_pnl'] + (analytics.get('total_net_pnl', 0) or 0):,.2f}", help="Current equity estimate")
+    c2.metric("Win Rate", f"{analytics.get('win_rate_%', 0):.2f}%")
+    c3.metric("Drawdown", f"{analytics.get('max_drawdown_%', 0):.2f}%")
+    c4.metric("Profit Factor", f"{analytics.get('profit_factor', 0):.2f}")
+    c5.metric("Expectancy", f"₹{analytics.get('total_net_pnl', 0) / max(analytics.get('total_trades', 1), 1):,.2f}")
+
+    try:
+        from pnl_manager import pnl
+        monthly_df = pnl.get_pnl_summary_by_period("MONTHLY")
+        if not monthly_df.empty:
+            st.subheader("📅 Monthly Report")
+            st.dataframe(monthly_df, use_container_width=True, hide_index=True)
+
+        equity_points = []
+        try:
+            with pnl._get_connection() as conn:
+                equity_points = pd.read_sql_query("SELECT timestamp, capital FROM equity_curve ORDER BY id ASC", conn)
+        except Exception:
+            equity_points = pd.DataFrame(columns=["timestamp", "capital"])
+        if not equity_points.empty:
+            st.subheader("📈 Equity Curve")
+            fig = px.line(equity_points, x="timestamp", y="capital", template="plotly_dark", title="Equity Curve")
+            st.plotly_chart(fig, use_container_width=True)
+
+        if not monthly_df.empty:
+            st.subheader("🔥 Trade Heatmap")
+            heatmap_df = monthly_df.rename(columns={"Month": "Month", "Net_PnL": "PnL"})
+            heatmap_df["Month"] = heatmap_df["Month"].astype(str)
+            fig_heat = px.bar(heatmap_df, x="Month", y="PnL", color="PnL", template="plotly_dark", title="Monthly PnL Heatmap")
+            st.plotly_chart(fig_heat, use_container_width=True)
+    except Exception:
+        st.caption("Performance report preview unavailable in this session.")
+
 # Navigation Tabs
 tabs = st.tabs([
     "💼 Live Order & Position Book",
@@ -435,14 +574,14 @@ with tabs[0]:
     with col_p:
         st.markdown("### 💼 Position Book")
         pos_df = broker_bridge.fetch_live_positions()
-        st.dataframe(pos_df, use_container_width=True)
+        st.dataframe(pos_df, width="stretch")
         total_pnl = pos_df["pnl"].sum() if "pnl" in pos_df.columns else 0.0
         st.metric("Total Open P&L", f"₹{total_pnl:,.2f}", delta=f"₹{total_pnl:,.2f}")
 
     with col_o:
         st.markdown("### 📜 Order Book")
         ord_df = broker_bridge.fetch_live_orders()
-        st.dataframe(ord_df, use_container_width=True)
+        st.dataframe(ord_df, width="stretch")
 
 # ==========================================
 # TAB 2: OPTION CHAIN MATRIX
@@ -461,7 +600,7 @@ with tabs[1]:
     st.dataframe(
         chain_df.style.background_gradient(subset=['CE_OI'], cmap='Greens')
                       .background_gradient(subset=['PE_OI'], cmap='Reds'),
-        use_container_width=True,
+        width="stretch",
         height=360
     )
 
@@ -473,7 +612,7 @@ with tabs[2]:
     col_b1, col_b2 = st.columns([1, 3])
     with col_b1:
         prod_type = st.selectbox("Product Type", ["INTRADAY", "DELIVERY"])
-        run_bt_btn = st.button("▶ Run Backtest", type="primary", use_container_width=True, disabled=not has_permission("Trader"))
+        run_bt_btn = st.button("▶ Run Backtest", type="primary", width="stretch", disabled=not has_permission("Trader"))
 
     if run_bt_btn:
         with st.spinner("Fetching Live Market Data & Executing Backtest..."):
@@ -498,7 +637,7 @@ with tabs[2]:
         
         if 'equity_curve' in res and len(res['equity_curve']) > 0:
             fig = px.line(pd.DataFrame(res['equity_curve']), x='timestamp', y='equity', title="Equity Performance Curve", template="plotly_dark")
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
 # ==========================================
 # TAB 4: ROLLING WALK-FORWARD
@@ -520,7 +659,7 @@ with tabs[3]:
                 st.session_state['wfa_results'] = wfa_res
 
     if 'wfa_results' in st.session_state:
-        st.dataframe(pd.DataFrame(st.session_state['wfa_results']), use_container_width=True)
+        st.dataframe(pd.DataFrame(st.session_state['wfa_results']), width="stretch")
 
 # ==========================================
 # TAB 5: MONTE CARLO STRESS TEST
@@ -554,7 +693,7 @@ with tabs[5]:
     if 'bt_engine' in st.session_state:
         bt = st.session_state['bt_engine']
         if hasattr(bt, 'sector_exposure_history') and bt.sector_exposure_history:
-            st.plotly_chart(px.area(pd.DataFrame(bt.sector_exposure_history), title="Sector Allocation History", template="plotly_dark"), use_container_width=True)
+            st.plotly_chart(px.area(pd.DataFrame(bt.sector_exposure_history), title="Sector Allocation History", template="plotly_dark"), width="stretch")
         else:
             st.info("No Sector Allocation data available yet.")
     else:

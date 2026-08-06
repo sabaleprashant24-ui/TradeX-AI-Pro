@@ -16,8 +16,8 @@ from datetime import datetime
 
 # Direct Imports from Core Sub-Systems
 from logger import logger
-from config import config
-from database import db
+from config import Config
+from database import DB as db
 from broker import BrokerConnector
 from scanner import MarketScanner
 from option_chain import OptionChainEngine
@@ -29,12 +29,12 @@ from paper_trade import PaperTrader
 class TradeXOrchestrator:
     def __init__(self):
         logger.info("Initializing TradeX AI Pro v5.2 Master Workstation Systems...")
-        self.config = config
+        self.config = Config
         self.db = db
         
         # Initialize Core Modules
         self.pnl_manager = PnLManager(initial_capital=self.config.INITIAL_CAPITAL)
-        self.risk_manager = RiskManager(max_capital=self.config.INITIAL_CAPITAL)
+        self.risk_manager = RiskManager(initial_capital=self.config.INITIAL_CAPITAL)
         self.order_manager = OrderManager()
         self.paper_trader = PaperTrader(initial_capital=self.config.INITIAL_CAPITAL)
         
@@ -55,9 +55,29 @@ class TradeXOrchestrator:
             if hasattr(self.broker, 'check_connection'):
                 broker_status = self.broker.check_connection()
                 logger.info(f"Broker Bridge Status: {broker_status}")
+
+            # Backward-compatible Angel One bridge lookup.
+            ANGEL_API = None
+            try:
+                from angel_login import ANGEL_API as ANGEL_API
+            except ImportError:
+                try:
+                    from angel_api import ANGEL_API as ANGEL_API
+                except ImportError:
+                    ANGEL_API = None
+
+            if ANGEL_API is not None:
+                if not getattr(ANGEL_API, 'is_connected', False):
+                    logger.info("Connecting Angel One SmartAPI...")
+                    if hasattr(ANGEL_API, 'connect') and ANGEL_API.connect():
+                        logger.info("Angel One Connected Successfully")
+                    else:
+                        logger.error("Angel One Connection Failed")
+                else:
+                    logger.info("Angel One Broker API already connected.")
             else:
                 logger.info("Broker Connector Initialized Successfully.")
-            
+
             return True
         except Exception as e:
             logger.critical(f"Pre-flight Checks Failed: {e}")
@@ -68,8 +88,10 @@ class TradeXOrchestrator:
         logger.info("--- Executing Live Market Scanning Cycle ---")
         try:
             # 1. Fetch Option Chain & Hero-Zero Analysis
-            chain_df, pcr, max_pain, spot = self.option_engine.fetch_live_chain()
-            hero_zero_signal = self.option_engine.analyze_hero_zero(chain_df, spot)
+            chain_df, option_analytics, spot = self.option_engine.fetch_live_chain()
+            pcr = option_analytics.get("pcr", 0.0)
+            max_pain = option_analytics.get("max_pain", 0.0)
+            hero_zero_signal = self.option_engine.analyze_hero_zero(chain_df, spot, pcr)
             logger.info(f"Spot: {spot} | PCR: {pcr} | Max Pain: {max_pain} | Hero-Zero Signal: {hero_zero_signal.get('recommendation', 'NEUTRAL')}")
 
             # 2. Run Market Scanner Engine
@@ -145,7 +167,7 @@ if __name__ == "__main__":
     orchestrator = TradeXOrchestrator()
     if orchestrator.run_preflight_checks():
         print("=====================================================")
-        print("⚡ TradeX AI Pro v5.2 Master Controller Initialized")
+        print("TradeX AI Pro v5.2 Master Controller Initialized")
         print("=====================================================")
         
         # CLI Modes: --cli (Single Run), --loop (Continuous Trading), Default (Dashboard)

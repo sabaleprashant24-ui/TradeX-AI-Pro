@@ -11,12 +11,11 @@ Compatible with Python 3.13 and Pydroid 3.
 from datetime import datetime, time, timedelta
 import functools
 import json
-import logging
 import math
 import time as time_lib
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-logger = logging.getLogger("TradeX_Utils")
+from logger import LOGGER
 
 
 def retry(
@@ -32,11 +31,11 @@ def retry(
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    logger.warning(
+                    LOGGER.warning(
                         f"Attempt {attempt}/{max_retries} failed for {func.__name__}: {e}"
                     )
                     if attempt == max_retries:
-                        logger.error(
+                        LOGGER.error(
                             f"Max retries reached for {func.__name__}. Raising exception."
                         )
                         raise e
@@ -58,11 +57,25 @@ class TimeUtils:
 
     @staticmethod
     def is_market_open(
-        open_time: time = time(9, 15), close_time: time = time(15, 30)
+        open_time: time = time(9, 15),
+        close_time: time = time(15, 30),
+        is_mcx: bool = False,
     ) -> bool:
-        """Checks if current time falls within market hours."""
-        now = datetime.now().time()
-        return open_time <= now <= close_time
+        """
+        Checks if current time falls within market hours and is a weekday.
+        Supports MCX segment timings (up to 23:30 / 23:55).
+        """
+        now_dt = datetime.now()
+        # Check if today is Saturday (5) or Sunday (6)
+        if now_dt.weekday() in (5, 6):
+            return False
+
+        # If MCX is enabled, set close time to 23:30 by default
+        if is_mcx and close_time == time(15, 30):
+            close_time = time(23, 30)
+
+        now_time = now_dt.time()
+        return open_time <= now_time <= close_time
 
     @staticmethod
     def is_expiry_day(expiry_weekday: int = 3) -> bool:
@@ -99,7 +112,7 @@ class MathUtils:
 
     @staticmethod
     def get_strike_step(symbol: str) -> float:
-        """Returns default strike step distance for Indian indices."""
+        """Returns default strike step distance for Indian indices and commodities."""
         symbol_upper = symbol.upper()
         if "BANKNIFTY" in symbol_upper:
             return 100.0
@@ -111,6 +124,12 @@ class MathUtils:
             return 25.0
         elif "FINNIFTY" in symbol_upper:
             return 50.0
+        elif "CRUDEOIL" in symbol_upper:
+            return 100.0
+        elif "GOLD" in symbol_upper:
+            return 100.0
+        elif "NATURALGAS" in symbol_upper:
+            return 0.50
         else:  # NIFTY and Default
             return 50.0
 
@@ -137,7 +156,7 @@ class JSONUtils:
         try:
             return json.dumps(data, default=str)
         except Exception as e:
-            logger.error(f"Error converting to JSON: {e}")
+            LOGGER.error(f"Error converting to JSON: {e}")
             return "{}"
 
     @staticmethod
@@ -146,5 +165,5 @@ class JSONUtils:
         try:
             return json.loads(json_str)
         except Exception as e:
-            logger.error(f"Error parsing JSON: {e}")
+            LOGGER.error(f"Error parsing JSON: {e}")
             return {}
